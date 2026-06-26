@@ -4,6 +4,7 @@ import type { Auth } from "~ts/Auth";
 class AuthHandler {
   private token: string | null = null;
   private refresh: string | null = null;
+  private refreshPromise: Promise<Auth | null> | null = null;
   private storage: Storage;
   private loginStateListeners: LoginListener[] = [];
 
@@ -12,11 +13,11 @@ class AuthHandler {
     this.load();
   }
 
-  addLoginListener(loginListener) {
+  addLoginListener(loginListener: LoginListener) {
     this.loginStateListeners.push(loginListener);
   }
 
-  removeLoginListener(loginListener) {
+  removeLoginListener(loginListener: LoginListener) {
     this.loginStateListeners = this.loginStateListeners.filter(
       (listener) => listener != loginListener
     );
@@ -57,28 +58,45 @@ class AuthHandler {
   async logout() {
     this.token = null;
     this.refresh = null;
-    await this.storage.clear();
+    await this.storage.remove("__access__");
+    this.loginStateListeners.forEach((listener) => listener("logout"));
   }
 
   async getAccessToken() {
-    if(!this.token){
-      await this.load()
+    if (!this.token) {
+      await this.load();
     }
     return this.token;
   }
 
   async getRefresh() {
-    if(!this.token){
-      await this.load()
+    if (!this.refresh) {
+      await this.load();
     }
 
     return this.refresh;
   }
 
   async refreshToken(): Promise<Auth | null> {
+    if (this.refreshPromise) {
+      return this.refreshPromise;
+    }
+
+    this.refreshPromise = this.performRefresh().finally(() => {
+      this.refreshPromise = null;
+    });
+
+    return this.refreshPromise;
+  }
+
+  private async performRefresh(): Promise<Auth | null> {
     try {
       const token = await this.getAccessToken();
-      const refresh = await this.getRefresh()
+      const refresh = await this.getRefresh();
+      if (!token || !refresh) {
+        throw new Error("Missing session tokens");
+      }
+
       const res = await fetch(
         `${process.env.PLASMO_PUBLIC_API_ROUTE}/auth/refresh`,
         {
@@ -92,13 +110,21 @@ class AuthHandler {
           },
         }
       );
+
+      if (!res.ok) {
+        throw new Error("Session refresh failed");
+      }
+
       const json = (await res.json()) as Auth;
+      if (!json?.access_token || !json?.refresh) {
+        throw new Error("Invalid session refresh response");
+      }
 
       await this.setTokens(json);
 
       return json;
     } catch (exc) {
-      this.logout();
+      await this.logout();
       return null;
     }
   }

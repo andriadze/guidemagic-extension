@@ -6,7 +6,7 @@ export function LoginButton() {
   };
   return (
     <button onClick={handleLogin} className="login-button">
-      Log in
+      Log In to GuideMagic
     </button>
   );
 }

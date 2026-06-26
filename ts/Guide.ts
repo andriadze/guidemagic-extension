@@ -1,4 +1,5 @@
 import type { Step } from "./Step";
+import type { AppendRecordingContext } from "./AppendRecording";
 
 export interface Guide {
   id: number;
@@ -7,4 +8,6 @@ export interface Guide {
   active?: boolean;
   steps?: Step[];
   stepCount?: number;
+  recordingMode?: "new-guide" | "append";
+  appendRecording?: AppendRecordingContext;
 }

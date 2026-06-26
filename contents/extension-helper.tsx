@@ -2,23 +2,57 @@ import type { PlasmoCSConfig } from "plasmo";
 
 export const config: PlasmoCSConfig = {
   matches: [
+    "http://localhost:3000/*",
+    "http://localhost:3001/*",
     "http://localhost:5173/*",
     "https://www.guidemagic.ai/*",
     "https://app.guidemagic.ai/*",
   ],
 };
 
-setTimeout(() => {
-  /* Example: Send data from the page to your Chrome extension */
+const dispatchExtensionPresent = () => {
   document.dispatchEvent(
-    new CustomEvent("$$_guidemagic_extension_present_$$", {})
+    new CustomEvent("$$_guidemagic_extension_present_$$", {
+      detail: {
+        isPinned: false,
+        openPopupAvailable: true,
+        appendRecordingAvailable: true,
+      },
+    }),
   );
-}, 100);
+};
 
+window.addEventListener("message", (event) => {
+  if (event.source !== window || event.data?.type !== "OPEN_POPUP") {
+    return;
+  }
 
-setInterval(() => {
-  /* Example: Send data from the page to your Chrome extension */
-  document.dispatchEvent(
-    new CustomEvent("$$_guidemagic_extension_present_$$", {})
+  chrome.runtime.sendMessage(
+    { type: "OPEN_POPUP", appendRecording: event.data.appendRecording },
+    (response) => {
+      window.postMessage(
+        {
+          type: "OPEN_POPUP_ACK",
+          requestId: event.data.requestId,
+          opened: Boolean(response?.opened),
+        },
+        "*",
+      );
+    },
   );
-}, 2000);
+});
+
+chrome.runtime.onMessage.addListener((message) => {
+  if (message?.type !== "APPEND_RECORDING_COMPLETE") return;
+
+  window.postMessage(
+    {
+      type: "APPEND_RECORDING_COMPLETE",
+      guideId: message.guideId,
+    },
+    "*",
+  );
+});
+
+setTimeout(dispatchExtensionPresent, 100);
+setInterval(dispatchExtensionPresent, 2000);

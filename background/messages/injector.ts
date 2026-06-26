@@ -1,4 +1,4 @@
-chrome.runtime.onInstalled.addListener(async () => {
+chrome.runtime.onInstalled.addListener(async (details) => {
   for (const cs of chrome.runtime.getManifest().content_scripts) {
     for (const tab of await chrome.tabs.query({ url: cs.matches })) {
       if (tab.url.match(/(chrome|chrome-extension):\/\//gi)) {
@@ -13,7 +13,9 @@ chrome.runtime.onInstalled.addListener(async () => {
     }
   }
 
-  setTimeout(() => {
-    chrome.tabs.create({url: process.env.PLASMO_PUBLIC_APP_ROUTE});
-  }, 1000)
+  if (details.reason === "install") {
+    setTimeout(() => {
+      chrome.tabs.create({ url: process.env.PLASMO_PUBLIC_APP_ROUTE });
+    }, 1000);
+  }
 });

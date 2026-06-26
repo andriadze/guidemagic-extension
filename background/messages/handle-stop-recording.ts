@@ -1,12 +1,14 @@
 import type { PlasmoMessaging } from "@plasmohq/messaging";
-import { Storage } from "@plasmohq/storage";
-import { createStep, uploadImage } from "~api/step.api";
-import type { Guide } from "~ts/Guide";
 import { stopRecording } from "~util/stopRecording";
 
-
 const handler: PlasmoMessaging.MessageHandler = async (req, res) => {
-  stopRecording();
+  try {
+    await stopRecording();
+    res.send({ success: true });
+  } catch (error) {
+    console.error("Could not stop recording", error);
+    res.send({ success: false });
+  }
 };
 
 export default handler;

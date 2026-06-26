@@ -1,18 +1,32 @@
 import "./rec-button.css";
 
 interface Props {
-  isRecording: boolean;
-  onClick: () => void;
+  isRecording?: boolean;
+  pending?: boolean;
+  onClick: () => void | Promise<void>;
+  disabled?: boolean;
 }
 export function RecordButton(props: Props) {
+  const label = props.pending
+    ? props.isRecording
+      ? "Stopping..."
+      : "Starting..."
+    : props.isRecording
+      ? "Stop Recording"
+      : "Start Recording";
+
   return (
-    <div
+    <button
+      type="button"
       onClick={props.onClick}
-      className={`rec-button ${
-        props.isRecording && "rec-button-active"
-      } `}
+      disabled={props.disabled || props.pending}
+      className={`record-button ${props.isRecording ? "is-recording" : ""}`}
     >
-      {props.isRecording ? 'STOP' : 'REC'}
-    </div>
+      <span
+        className={`record-button-icon ${props.pending ? "is-pending" : ""}`}
+        aria-hidden="true"
+      />
+      <span>{label}</span>
+    </button>
   );
 }

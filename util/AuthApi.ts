@@ -2,35 +2,59 @@ import AuthHandler from "./AuthHandler";
 
 const baseURL = process.env.PLASMO_PUBLIC_API_ROUTE;
 
-const fetchWithAuth = async (url: string, options: RequestInit) => {
-  // Add the Authorization header to the request
-  const accessToken = await AuthHandler.getAccessToken();
-  options.headers = {
-    ...options.headers,
-    Authorization: `Bearer ${accessToken}`,
-  };
-
-  console.log("Fetching", url, options);
-  const fetchWithRetry = async () => {
-    const response = await fetch(baseURL + url, options);
-    if (response.status === 403 || response.status === 401) {
-      const res = await AuthHandler.refreshToken();
-      options.headers["Authorization"] = `Bearer ${res?.access_token}`;
-      return fetch(baseURL + url, options);
-    }
-    return response;
-  };
-
-  try {
-    const response = await fetchWithRetry();
-    if (response.status >= 400 && response.status < 600) {
-      throw new Error("Bad response from server");
-    }
-    return response;
-  } catch (error) {
-    console.log(error);
-    return Promise.reject(error);
+export class AuthApiError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number
+  ) {
+    super(message);
+    this.name = "AuthApiError";
   }
+}
+
+function withAccessToken(options: RequestInit, accessToken: string) {
+  const headers = new Headers(options.headers);
+  headers.set("Authorization", `Bearer ${accessToken}`);
+
+  return {
+    ...options,
+    headers,
+  };
+}
+
+const fetchWithAuth = async (url: string, options: RequestInit) => {
+  const accessToken = await AuthHandler.getAccessToken();
+  if (!accessToken) {
+    await AuthHandler.logout();
+    throw new AuthApiError("User session is no longer valid", 401);
+  }
+
+  let requestOptions = withAccessToken(options, accessToken);
+  let response = await fetch(baseURL + url, requestOptions);
+
+  if (response.status === 401) {
+    const refreshedAuth = await AuthHandler.refreshToken();
+    if (!refreshedAuth) {
+      throw new AuthApiError("User session is no longer valid", 401);
+    }
+
+    requestOptions = withAccessToken(options, refreshedAuth.access_token);
+    response = await fetch(baseURL + url, requestOptions);
+
+    if (response.status === 401) {
+      await AuthHandler.logout();
+      throw new AuthApiError("User session is no longer valid", 401);
+    }
+  }
+
+  if (!response.ok) {
+    throw new AuthApiError(
+      `Request failed with status ${response.status}`,
+      response.status
+    );
+  }
+
+  return response;
 };
 
 export default fetchWithAuth;

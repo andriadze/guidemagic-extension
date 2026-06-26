@@ -2,30 +2,30 @@ import type { Step } from "~ts/Step";
 import fetchWithAuth from "~util/AuthApi";
 import { dataURItoBlob } from "~util/dataUriToBlob";
 
-export async function createStep(guideId: number, stepInfo: Step) {
-  try {
-    const stepCreationResp = await fetchWithAuth("/steps", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        guideId,
-        ...stepInfo,
-      }),
-    });
+export async function createStep(guideId: number, stepInfo: Step): Promise<Step> {
+  const stepCreationResp = await fetchWithAuth("/steps", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      guideId,
+      ...stepInfo,
+    }),
+  });
 
-    const json = await stepCreationResp.json();
-
-    return json;
-  } catch (exc) {
-    console.log(exc);
-
-    return null;
-  }
+  return stepCreationResp.json();
 }
 
-export async function uploadImage(step: Step, image: string, retry = 0) {
+export async function uploadImage(
+  step: Step,
+  image: string,
+  retry = 0
+): Promise<boolean> {
+  if (!step?.id || !image) {
+    return false;
+  }
+
   try {
     const blob = dataURItoBlob(image);
     const formData = new FormData();
@@ -35,14 +35,13 @@ export async function uploadImage(step: Step, image: string, retry = 0) {
       body: formData,
     });
 
-    const json = res.json();
-    console.log(json);
+    await res.json();
     return true;
   } catch (exc) {
     console.log(exc);
-    if(retry < 3){
-      uploadImage(step, image, retry + 1)
+    if (retry < 3) {
+      return uploadImage(step, image, retry + 1);
     }
-    return null;
+    return false;
   }
 }

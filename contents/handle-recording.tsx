@@ -3,6 +3,7 @@ import { Storage } from "@plasmohq/storage";
 import type {
   PlasmoCSConfig,
   PlasmoGetStyle,
+  PlasmoMountShadowHost,
   PlasmoWatchOverlayAnchor,
 } from "plasmo";
 import {
@@ -11,7 +12,6 @@ import {
   useMemo,
   useRef,
   useState,
-  type MouseEventHandler,
 } from "react";
 import type { Guide } from "~ts/Guide";
 import parseTitle from "~util/parseTitle";
@@ -22,6 +22,23 @@ export const config: PlasmoCSConfig = {
   matches: ["<all_urls>"],
   all_frames: true,
   css: ["global-styles.css"],
+};
+
+export const mountShadowHost: PlasmoMountShadowHost = ({ shadowHost }) => {
+  const host = shadowHost as HTMLElement;
+  host.id = "guidemagic-recorder-host";
+  host.style.position = "fixed";
+  host.style.inset = "0 auto auto 0";
+  host.style.display = "block";
+  host.style.width = "0";
+  host.style.height = "0";
+  host.style.margin = "0";
+  host.style.padding = "0";
+  host.style.border = "0";
+  host.style.overflow = "visible";
+  host.style.pointerEvents = "none";
+  host.style.zIndex = "2147483647";
+  document.documentElement.prepend(host);
 };
 
 const storage = new Storage();
@@ -47,21 +64,30 @@ const PlasmoPricingExtra = () => {
   const [fade, setFade] = useState(false);
   const [rect, setRect] = useState(null);
   const lastElem = useRef<Element>();
+  const stoppingRef = useRef(false);
 
-  const handleStopRecording = async (event: MouseEvent) => {
-    event.stopPropagation();
+  const handleStopRecording = async () => {
+    if (stoppingRef.current) {
+      return;
+    }
+
+    stoppingRef.current = true;
     setRect(null);
     setRecording(false);
     setPerformAnim(false);
-    sendToBackground({
-      name: "handle-stop-recording",
-      body: {},
-    });
-  };
-
-  const getStepCount = async () => {
-    const res = await storage.get<Guide>("guide");
-    return res.stepCount;
+    try {
+      const result = await sendToBackground({
+        name: "handle-stop-recording",
+        body: {},
+      });
+      if (!result?.success) {
+        throw new Error("Stop request failed");
+      }
+    } catch (error) {
+      stoppingRef.current = false;
+      console.error("Could not stop recording", error);
+      await handleInit();
+    }
   };
 
   const handleMouseOver = useCallback(
@@ -119,7 +145,7 @@ const PlasmoPricingExtra = () => {
     }, 3000);
   }, [performAnim]);
 
-  const onMouseUp = () => {
+  const onMouseUp = (event: PointerEvent) => {
     if (!isRecording) {
       return;
     }
@@ -161,31 +187,46 @@ const PlasmoPricingExtra = () => {
         devicePixelRatio,
       } = getWindowInformation();
 
-      const steps = (await getStepCount()) || 0;
-      setStepCount(steps + 1);
-      const { img } = await sendToBackground({
-        name: "take-screenshot",
-        body: {
-          title,
-          htmlTag,
-          url: window.location.href,
-          placeholder,
-          parentTitle,
-          height: rect.height,
-          width: rect.width,
-          top: rect.top,
-          left: rect.left,
-          bottom: rect.bottom,
-          right: rect.right,
-          scrollX: scrollX,
-          scrollY: scrollY,
-          windowWidth,
-          windowHeight,
-          screenWidth,
-          screenHeight,
-          devicePixelRatio,
-        },
-      });
+      try {
+        const result = await sendToBackground({
+          name: "take-screenshot",
+          body: {
+            title,
+            htmlTag,
+            url: window.location.href,
+            placeholder,
+            parentTitle,
+            height: rect.height,
+            width: rect.width,
+            top: rect.top,
+            left: rect.left,
+            bottom: rect.bottom,
+            right: rect.right,
+            scrollX: scrollX,
+            scrollY: scrollY,
+            mousePosX: event.clientX,
+            mousePosY: event.clientY,
+            windowWidth,
+            windowHeight,
+            screenWidth,
+            screenHeight,
+            devicePixelRatio,
+          },
+        });
+
+        if (result?.success) {
+          setStepCount((currentCount) => currentCount + 1);
+        } else {
+          console.error("Recording step was not captured", result?.error);
+          if (result?.stopRecording) {
+            setRect(null);
+            setRecording(false);
+            setPerformAnim(false);
+          }
+        }
+      } catch (error) {
+        console.error("Could not send recording step", error);
+      }
     },
     [isRecording]
   );
@@ -251,26 +292,19 @@ const PlasmoPricingExtra = () => {
     handleScrollFinished,
   ]);
 
-  if (!rect) {
-    return (
-      <>
-        {recordingStarting && (
-          <div
-            className="main-container"
-            style={{
-              width: "100vw",
-              height: "100vh",
-            }}
-          >
-            <div className="rec-starting">Recording starting...</div>
-          </div>
-        )}
-      </>
-    );
-  }
-
   return (
     <>
+      {recordingStarting && (
+        <div
+          className="main-container"
+          style={{
+            width: "100vw",
+            height: "100vh",
+          }}
+        >
+          <div className="rec-starting">Recording starting...</div>
+        </div>
+      )}
       {performAnim && (
         <div className="main-container-ripple">
           <span className="ripple"></span>
@@ -284,19 +318,21 @@ const PlasmoPricingExtra = () => {
           className={"fade-in-container"}
         />
       )}
-      <div
-        id="rec_border"
-        style={{
-          width: rect?.width + 12,
-          height: rect?.height + 12,
-          top: rect?.top - 3 - 6 + window.scrollY,
-          left: rect?.left - 3 - 6 + window.scrollX,
-          position: "absolute",
-          // border: "3px solid blue",
-          borderRadius: 3,
-          pointerEvents: "none",
-        }}
-      ></div>
+      {rect && (
+        <div
+          id="rec_border"
+          style={{
+            width: rect.width + 12,
+            height: rect.height + 12,
+            top: rect.top - 3 - 6,
+            left: rect.left - 3 - 6,
+            position: "fixed",
+            // border: "3px solid blue",
+            borderRadius: 3,
+            pointerEvents: "none",
+          }}
+        ></div>
+      )}
       {isRecording && (
         <RecButton
           animate={fade}
@@ -311,15 +347,32 @@ const PlasmoPricingExtra = () => {
 const RecButton = (props: {
   stepCount: number;
   animate: boolean;
-  onStopClicked: (ev: any) => void;
+  onStopClicked: () => void;
 }) => {
   const [hovering, setHovering] = useState(false);
 
   return (
-    <div
+    <button
+      type="button"
       id="___guidemagic__inject__button__"
       className={`recording-button ${props.animate ? "rec-button-anim" : ""}`}
-      onClick={props.onStopClicked}
+      aria-label="Stop recording"
+      onPointerDown={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        props.onStopClicked();
+      }}
+      onClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      }}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          event.stopPropagation();
+          props.onStopClicked();
+        }
+      }}
       onMouseEnter={() => setHovering(true)}
       onMouseLeave={() => setHovering(false)}
     >
@@ -333,7 +386,7 @@ const RecButton = (props: {
       ) : (
         <img className="recording-logo" src={logoImage}></img>
       )}
-    </div>
+    </button>
   );
 };
 
@@ -446,6 +499,8 @@ export const getStyle: PlasmoGetStyle = () => {
       cursor: pointer;
       font-size: 30px;
       background-color: white;
+      border: 0;
+      padding: 0;
       border-radius: 99px;
       position: fixed;
       right: 50px;
@@ -454,6 +509,9 @@ export const getStyle: PlasmoGetStyle = () => {
       font-family: Arial;
       box-shadow: rgba(0, 0, 0, 0.26) 0px 1px 4px;
       animation: scaleRec 2.5s infinite; 
+      pointer-events: auto;
+      box-sizing: border-box;
+      will-change: transform;
   }
 
   .rec-button-anim{
@@ -461,8 +519,7 @@ export const getStyle: PlasmoGetStyle = () => {
   }
 
   .recording-button:hover{
-      width: 80px;
-      height: 80px; 
+      transform: scale(1.1);
       animation: none;
   }
 
