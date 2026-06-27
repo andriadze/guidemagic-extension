@@ -24,7 +24,7 @@ function canRecordForRole(role?: TeamRole) {
 
 function IndexPopup() {
   const [authReady, setAuthReady] = useState(false);
-  const [isLoggedIn, setIsLoggedIn] = useState(AuthHandler.isLoggedIn());
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [sessionExpired, setSessionExpired] = useState(false);
   const {
     guide,
@@ -62,7 +62,7 @@ function IndexPopup() {
     };
 
     AuthHandler.addLoginListener(syncAuthState);
-    AuthHandler.getAccessToken().finally(syncAuthState);
+    AuthHandler.waitUntilLoaded().finally(syncAuthState);
 
     return () => {
       mounted = false;

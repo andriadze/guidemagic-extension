@@ -5,12 +5,13 @@ class AuthHandler {
   private token: string | null = null;
   private refresh: string | null = null;
   private refreshPromise: Promise<Auth | null> | null = null;
+  private loadPromise: Promise<void>;
   private storage: Storage;
   private loginStateListeners: LoginListener[] = [];
 
   constructor() {
     this.storage = new Storage();
-    this.load();
+    this.loadPromise = this.load();
   }
 
   addLoginListener(loginListener: LoginListener) {
@@ -45,6 +46,10 @@ class AuthHandler {
     }
   }
 
+  async waitUntilLoaded() {
+    await this.loadPromise;
+  }
+
   async setTokens(auth: Auth) {
     this.refresh = auth.refresh;
     this.token = auth.access_token;
@@ -53,6 +58,7 @@ class AuthHandler {
       refresh: auth.refresh,
       access_token: auth.access_token,
     });
+    this.loginStateListeners.forEach((listener) => listener("login"));
   }
 
   async logout() {
@@ -63,15 +69,19 @@ class AuthHandler {
   }
 
   async getAccessToken() {
+    await this.waitUntilLoaded();
     if (!this.token) {
-      await this.load();
+      this.loadPromise = this.load();
+      await this.loadPromise;
     }
     return this.token;
   }
 
   async getRefresh() {
+    await this.waitUntilLoaded();
     if (!this.refresh) {
-      await this.load();
+      this.loadPromise = this.load();
+      await this.loadPromise;
     }
 
     return this.refresh;

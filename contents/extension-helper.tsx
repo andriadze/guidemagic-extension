@@ -27,14 +27,33 @@ window.addEventListener("message", (event) => {
     return;
   }
 
+  console.info("[GuideMagic popup] content received OPEN_POPUP", {
+    requestId: event.data.requestId,
+    appendRecording: event.data.appendRecording,
+  });
+
   chrome.runtime.sendMessage(
     { type: "OPEN_POPUP", appendRecording: event.data.appendRecording },
     (response) => {
+      const runtimeError = chrome.runtime.lastError;
+      if (runtimeError) {
+        console.error("[GuideMagic popup] content sendMessage failed", {
+          requestId: event.data.requestId,
+          error: runtimeError.message,
+        });
+      } else {
+        console.info("[GuideMagic popup] content received background response", {
+          requestId: event.data.requestId,
+          response,
+        });
+      }
+
       window.postMessage(
         {
           type: "OPEN_POPUP_ACK",
           requestId: event.data.requestId,
           opened: Boolean(response?.opened),
+          error: runtimeError?.message || response?.error,
         },
         "*",
       );
