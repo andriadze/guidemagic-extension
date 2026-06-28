@@ -30,7 +30,11 @@
   "manifest": {
     "permissions": [
       "activeTab",
+      "alarms",
+      "audioCapture",
+      "offscreen",
       "scripting",
+      "videoCapture",
       "<all_urls>"
     ],
     "host_permissions": [

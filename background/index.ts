@@ -1,9 +1,12 @@
 import { Storage } from "@plasmohq/storage";
 
 import type { PendingAppendRecordingContext } from "~ts/AppendRecording";
+import { registerVideoRecordingBackground } from "./video-recording";
 
 const storage = new Storage();
 const POPUP_DEBUG_VERSION = "2026-06-28-open-popup-timeout";
+
+registerVideoRecordingBackground();
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string) {
   return Promise.race([

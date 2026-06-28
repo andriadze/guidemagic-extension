@@ -14,6 +14,7 @@ import {
   useState,
 } from "react";
 import type { Guide } from "~ts/Guide";
+import type { StepEventType } from "~ts/Step";
 import parseTitle from "~util/parseTitle";
 import { getWindowInformation } from "~util/windowInformation";
 import logoImage from "data-base64:~/assets/icon.png";
@@ -42,6 +43,17 @@ export const mountShadowHost: PlasmoMountShadowHost = ({ shadowHost }) => {
 };
 
 const storage = new Storage();
+const DUPLICATE_SUBMIT_WINDOW_MS = 1000;
+
+type LastPointerCapture = {
+  form: HTMLFormElement | null;
+  target: HTMLElement;
+  capturedAt: number;
+};
+
+const shouldIgnoreTarget = (target: HTMLElement) =>
+  target.tagName === "PLASMO-CSUI" ||
+  target.id === "___guidemagic__inject__button__";
 
 export const watchOverlayAnchor: PlasmoWatchOverlayAnchor = (
   updatePosition
@@ -62,9 +74,14 @@ const PlasmoPricingExtra = () => {
   const [isRecording, setRecording] = useState(false);
   const [performAnim, setPerformAnim] = useState(false);
   const [fade, setFade] = useState(false);
+  const [videoPreviewActive, setVideoPreviewActive] = useState(false);
+  const [videoPreviewError, setVideoPreviewError] = useState("");
   const [rect, setRect] = useState(null);
+  const videoPreviewRef = useRef<HTMLVideoElement>(null);
+  const videoPreviewStreamRef = useRef<MediaStream | null>(null);
   const lastElem = useRef<Element>();
   const stoppingRef = useRef(false);
+  const lastPointerCaptureRef = useRef<LastPointerCapture | null>(null);
 
   const handleStopRecording = async () => {
     if (stoppingRef.current) {
@@ -134,6 +151,12 @@ const PlasmoPricingExtra = () => {
         setPerformAnim(false);
       } else if (request.message === "recordingStarting") {
         setRecordingStarting(true);
+      } else if (request.message === "startVideoPreview") {
+        setVideoPreviewError("");
+        setVideoPreviewActive(true);
+      } else if (request.message === "stopVideoPreview") {
+        setVideoPreviewActive(false);
+        setVideoPreviewError("");
       }
     },
     [isRecording, setRecording, setRect]
@@ -159,20 +182,19 @@ const PlasmoPricingExtra = () => {
     setFade(true);
   };
 
-  const onMouseDown = useCallback(
-    async (event) => {
-      if (!isRecording) {
-        return;
+  const recordStep = useCallback(
+    async (
+      target: HTMLElement,
+      options: {
+        eventType: StepEventType;
+        mousePosX?: number | null;
+        mousePosY?: number | null;
       }
-      const target = event.target as HTMLElement;
-      if (
-        target.tagName === "PLASMO-CSUI" ||
-        target.id === "___guidemagic__inject__button__"
-      ) {
-        return;
+    ) => {
+      if (!isRecording) {
+        return false;
       }
 
-      console.log("Event target", event.target);
       const placeholder = target.getAttribute("placeholder");
       const title = parseTitle(target);
       const parentTitle = parseTitle(target.parentNode);
@@ -193,6 +215,7 @@ const PlasmoPricingExtra = () => {
           body: {
             title,
             htmlTag,
+            eventType: options.eventType,
             url: window.location.href,
             placeholder,
             parentTitle,
@@ -204,8 +227,8 @@ const PlasmoPricingExtra = () => {
             right: rect.right,
             scrollX: scrollX,
             scrollY: scrollY,
-            mousePosX: event.clientX,
-            mousePosY: event.clientY,
+            mousePosX: options.mousePosX,
+            mousePosY: options.mousePosY,
             windowWidth,
             windowHeight,
             screenWidth,
@@ -216,6 +239,7 @@ const PlasmoPricingExtra = () => {
 
         if (result?.success) {
           setStepCount((currentCount) => currentCount + 1);
+          return true;
         } else {
           console.error("Recording step was not captured", result?.error);
           if (result?.stopRecording) {
@@ -227,8 +251,70 @@ const PlasmoPricingExtra = () => {
       } catch (error) {
         console.error("Could not send recording step", error);
       }
+
+      return false;
     },
     [isRecording]
+  );
+
+  const onMouseDown = useCallback(
+    async (event: PointerEvent) => {
+      if (!isRecording) {
+        return;
+      }
+      const target = event.target as HTMLElement;
+      if (shouldIgnoreTarget(target)) {
+        return;
+      }
+
+      lastPointerCaptureRef.current = {
+        form: target.closest("form"),
+        target,
+        capturedAt: Date.now(),
+      };
+
+      console.log("Event target", event.target);
+      await recordStep(target, {
+        eventType: "click",
+        mousePosX: event.clientX,
+        mousePosY: event.clientY,
+      });
+    },
+    [isRecording, recordStep]
+  );
+
+  const onSubmit = useCallback(
+    async (event: SubmitEvent) => {
+      if (!isRecording) {
+        return;
+      }
+
+      const form = event.target instanceof HTMLFormElement ? event.target : null;
+      if (!form || shouldIgnoreTarget(form)) {
+        return;
+      }
+
+      const lastPointerCapture = lastPointerCaptureRef.current;
+      const submitter =
+        event.submitter instanceof HTMLElement ? event.submitter : null;
+      if (
+        submitter &&
+        lastPointerCapture?.form === form &&
+        (lastPointerCapture.target === submitter ||
+          submitter.contains(lastPointerCapture.target)) &&
+        Date.now() - lastPointerCapture.capturedAt < DUPLICATE_SUBMIT_WINDOW_MS
+      ) {
+        return;
+      }
+
+      const target = submitter || form;
+      await recordStep(target, {
+        eventType: "submit",
+        mousePosX: null,
+        mousePosY: null,
+      });
+    },
+    [isRecording, recordStep]
   );
 
   const handleInit = useCallback(async () => {
@@ -265,10 +351,55 @@ const PlasmoPricingExtra = () => {
   }, [handleInit]);
 
   useEffect(() => {
+    if (!videoPreviewActive) {
+      videoPreviewStreamRef.current?.getTracks().forEach((track) => track.stop());
+      videoPreviewStreamRef.current = null;
+      if (videoPreviewRef.current) {
+        videoPreviewRef.current.srcObject = null;
+      }
+      return;
+    }
+
+    let cancelled = false;
+    navigator.mediaDevices
+      .getUserMedia({
+        video: {
+          width: { ideal: 320 },
+          height: { ideal: 180 },
+        },
+        audio: false,
+      })
+      .then((stream) => {
+        if (cancelled) {
+          stream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+        videoPreviewStreamRef.current = stream;
+        if (videoPreviewRef.current) {
+          videoPreviewRef.current.srcObject = stream;
+          void videoPreviewRef.current.play();
+        }
+      })
+      .catch((error) => {
+        console.warn("[GuideMagic video] camera preview unavailable", error);
+        if (!cancelled) {
+          setVideoPreviewError("Camera preview unavailable");
+        }
+      });
+
+    return () => {
+      cancelled = true;
+      videoPreviewStreamRef.current?.getTracks().forEach((track) => track.stop());
+      videoPreviewStreamRef.current = null;
+    };
+  }, [videoPreviewActive]);
+
+  useEffect(() => {
     document.addEventListener("mouseover", handleMouseOver);
     window.addEventListener("focus", handleInit);
     document.addEventListener("pointerdown", onMouseDown);
     document.addEventListener("pointerup", onMouseUp);
+    document.addEventListener("submit", onSubmit, true);
 
     document.addEventListener("scroll", handleScroll);
 
@@ -281,6 +412,7 @@ const PlasmoPricingExtra = () => {
       document.removeEventListener("mouseover", handleMouseOver);
       document.removeEventListener("pointerdown", onMouseDown);
       document.removeEventListener("pointerup", onMouseUp);
+      document.removeEventListener("submit", onSubmit, true);
       document.removeEventListener("scroll", handleScroll);
       document.removeEventListener("scrollend", handleScrollFinished);
       chrome.runtime.onMessage.removeListener(handleRecorderStatusChange);
@@ -290,6 +422,8 @@ const PlasmoPricingExtra = () => {
     handleScroll,
     handleRecorderStatusChange,
     handleScrollFinished,
+    onMouseDown,
+    onSubmit,
   ]);
 
   return (
@@ -339,6 +473,20 @@ const PlasmoPricingExtra = () => {
           onStopClicked={handleStopRecording}
           stepCount={stepCount}
         />
+      )}
+      {videoPreviewActive && (
+        <div className="video-preview-bubble">
+          {videoPreviewError ? (
+            <div className="video-preview-error">{videoPreviewError}</div>
+          ) : (
+            <video
+              ref={videoPreviewRef}
+              className="video-preview"
+              muted
+              playsInline
+            />
+          )}
+        </div>
       )}
     </>
   );
@@ -516,6 +664,40 @@ export const getStyle: PlasmoGetStyle = () => {
 
   .rec-button-anim{
     animation: scaleBounce 0.2s;      
+  }
+
+  .video-preview-bubble {
+    position: fixed;
+    right: 28px;
+    bottom: 132px;
+    width: 220px;
+    aspect-ratio: 16 / 9;
+    overflow: hidden;
+    border: 3px solid rgba(255, 255, 255, 0.9);
+    border-radius: 20px;
+    background: #0f172a;
+    box-shadow: 0 18px 42px rgba(15, 23, 42, 0.32);
+    pointer-events: none;
+  }
+
+  .video-preview {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transform: scaleX(-1);
+  }
+
+  .video-preview-error {
+    display: flex;
+    width: 100%;
+    height: 100%;
+    align-items: center;
+    justify-content: center;
+    padding: 12px;
+    color: #ffffff;
+    font-family: Arial;
+    font-size: 13px;
+    text-align: center;
   }
 
   .recording-button:hover{

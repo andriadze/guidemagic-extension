@@ -1,0 +1,20 @@
+export interface VideoRecordingOptions {
+  microphone: boolean;
+  webcam: boolean;
+}
+
+export interface VideoRecordingState {
+  guideId: number;
+  targetTabId?: number;
+  active: boolean;
+  status:
+    | "starting"
+    | "recording"
+    | "stopping"
+    | "uploading"
+    | "failed"
+    | "complete";
+  options: VideoRecordingOptions;
+  error?: string;
+  uploadStartedAt?: number;
+}

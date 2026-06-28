@@ -28,6 +28,7 @@ function IndexPopup() {
   const [sessionExpired, setSessionExpired] = useState(false);
   const {
     guide,
+    videoRecording,
     loading: guideLoading,
     actionPending,
     error: guideError,
@@ -35,7 +36,15 @@ function IndexPopup() {
     cancelPendingAppend,
     startRecording,
     stopRecording,
+    startVideoRecording,
+    stopVideoRecording,
+    retryVideoUpload,
   } = useGuide();
+  const [recordingMode, setRecordingMode] = useState<"steps" | "video">(
+    "steps",
+  );
+  const [recordMicrophone, setRecordMicrophone] = useState(false);
+  const [recordWebcam, setRecordWebcam] = useState(false);
   const [activeTabLabel, setActiveTabLabel] = useState("this tab");
   const {
     teams,
@@ -77,6 +86,8 @@ function IndexPopup() {
   }, []);
 
   const isRecording = Boolean(guide?.active);
+  const isVideoRecording = Boolean(videoRecording?.active);
+  const hasFailedVideoUpload = videoRecording?.status === "failed";
   const isAppending = isRecording && guide?.recordingMode === "append";
   const hasTeamPicker = teams.length > 1;
   const teamSelectionPending = teamsLoading || switching || !teamsLoaded;
@@ -89,11 +100,24 @@ function IndexPopup() {
     guideLoading ||
     actionPending ||
     teamSelectionPending ||
-    (!isRecording && !hasRecordingAccess);
+    (!isRecording && !isVideoRecording && !hasRecordingAccess);
 
   const handleRecordingAction = async () => {
+    if (isVideoRecording) {
+      await stopVideoRecording();
+      return;
+    }
+
     if (isRecording) {
       await stopRecording();
+      return;
+    }
+
+    if (recordingMode === "video") {
+      await startVideoRecording({
+        microphone: recordMicrophone,
+        webcam: recordWebcam,
+      });
       return;
     }
 
@@ -164,7 +188,12 @@ function IndexPopup() {
                 <span className="record-visual-shape" />
               </div>
               <h1>
-                {isAppending
+                {isVideoRecording
+                  ? videoRecording?.status === "uploading" ||
+                    videoRecording?.status === "stopping"
+                    ? "Saving video"
+                    : "Video recording in progress"
+                  : isAppending
                   ? `Adding steps to “${guide?.name || "Untitled guide"}”`
                   : isRecording
                   ? "Recording in progress"
@@ -175,7 +204,9 @@ function IndexPopup() {
                   : "Recording unavailable"}
               </h1>
               <p>
-                {isAppending
+                {isVideoRecording
+                  ? "Record your workflow, then stop to upload the video to your guide."
+                  : isAppending
                   ? "Complete the additional workflow, then stop to return to the original guide."
                   : isRecording
                   ? "Complete your workflow, then stop to generate your guide."
@@ -187,12 +218,66 @@ function IndexPopup() {
                   ? "Choose a team where you are an editor, admin, or owner."
                   : "You need editor, admin, or owner access to record for this team."}
               </p>
+              {!isRecording && !isVideoRecording && hasRecordingAccess && !pendingAppend && (
+                <div className="recording-mode-section">
+                  <div className="mode-toggle" role="tablist" aria-label="Recording mode">
+                    <button
+                      type="button"
+                      className={recordingMode === "steps" ? "is-active" : ""}
+                      onClick={() => setRecordingMode("steps")}
+                    >
+                      Step guide
+                    </button>
+                    <button
+                      type="button"
+                      className={recordingMode === "video" ? "is-active" : ""}
+                      onClick={() => setRecordingMode("video")}
+                    >
+                      Video
+                    </button>
+                  </div>
+                  {recordingMode === "video" && (
+                    <div className="video-options">
+                      <label>
+                        <input
+                          type="checkbox"
+                          checked={recordMicrophone}
+                          onChange={(event) =>
+                            setRecordMicrophone(event.target.checked)
+                          }
+                        />
+                        <span>Microphone</span>
+                      </label>
+                      <label>
+                        <input
+                          type="checkbox"
+                          checked={recordWebcam}
+                          onChange={(event) =>
+                            setRecordWebcam(event.target.checked)
+                          }
+                        />
+                        <span>Webcam</span>
+                      </label>
+                    </div>
+                  )}
+                </div>
+              )}
               <RecordButton
-                isRecording={isRecording}
+                isRecording={isRecording || isVideoRecording}
                 pending={actionPending}
                 disabled={recordingDisabled}
                 onClick={handleRecordingAction}
               />
+              {hasFailedVideoUpload && (
+                <button
+                  type="button"
+                  className="append-cancel-button"
+                  disabled={actionPending}
+                  onClick={retryVideoUpload}
+                >
+                  Retry video upload
+                </button>
+              )}
               {!isRecording && pendingAppend && (
                 <button
                   type="button"
@@ -203,9 +288,9 @@ function IndexPopup() {
                   Cancel adding steps
                 </button>
               )}
-              {(guideError || (!hasTeamPicker && teamError)) && (
+              {(guideError || videoRecording?.error || (!hasTeamPicker && teamError)) && (
                 <div className="inline-error" role="alert">
-                  {guideError || teamError}
+                  {guideError || videoRecording?.error || teamError}
                 </div>
               )}
             </section>
