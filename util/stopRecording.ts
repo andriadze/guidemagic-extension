@@ -25,7 +25,7 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string) {
 }
 
 async function stopOffscreenVideoRecording() {
-  console.info("[GuideMagic video] sending stop to offscreen recorder");
+  console.info("[GuideMagic video] sending stop to recorder controller");
   const response = await withTimeout(
     chrome.runtime.sendMessage({
       target: "video-recorder",
@@ -38,7 +38,7 @@ async function stopOffscreenVideoRecording() {
   if (!response?.success) {
     throw new Error(response?.error || "Could not stop video recording");
   }
-  console.info("[GuideMagic video] offscreen recorder accepted stop");
+  console.info("[GuideMagic video] recorder controller accepted stop");
 }
 
 async function sendMessageToRecordedTab(guide: Guide, message: string) {
@@ -73,7 +73,7 @@ async function stopVideoGuideRecording(guide: Guide) {
   });
 
   stopOffscreenVideoRecording().catch((error) => {
-    console.error("[GuideMagic video] offscreen recorder stop failed", {
+    console.error("[GuideMagic video] recorder controller stop failed", {
       guideId: guide.id,
       error,
     });
@@ -92,6 +92,30 @@ async function stopVideoGuideRecording(guide: Guide) {
   });
 }
 
+async function closeRecorderTab() {
+  const recorderTabId = await storage.get<number>("videoRecorderTabId");
+  const recorderWindowId = await storage.get<number>("videoRecorderWindowId");
+  await storage.remove("videoRecorderTabId");
+  await storage.remove("videoRecorderWindowId");
+
+  if (recorderTabId) {
+    await chrome.tabs.remove(recorderTabId).catch(() => undefined);
+    return;
+  }
+
+  if (recorderWindowId) {
+    await chrome.windows.remove(recorderWindowId).catch(() => undefined);
+  }
+}
+
+async function cancelVideoSetupRecording(guide: Guide) {
+  await stopOffscreenVideoRecording().catch(() => undefined);
+  await storage.remove("guide");
+  await storage.remove("videoRecording");
+  await stopRecordingApi(guide.id).catch(() => undefined);
+  await closeRecorderTab();
+}
+
 export async function stopRecording() {
   const guide = await storage.get<Guide>("guide");
   if (!guide?.id) {
@@ -99,6 +123,18 @@ export async function stopRecording() {
       "videoRecording",
     );
     if (videoRecording?.guideId && videoRecording.active) {
+      if (videoRecording.status === "starting") {
+        await cancelVideoSetupRecording({
+          id: videoRecording.guideId,
+          active: false,
+          stepCount: 0,
+          recordingMode: "video",
+          recordingTabId: videoRecording.targetTabId,
+          videoRecording: videoRecording.options,
+        });
+        return;
+      }
+
       await stopVideoGuideRecording({
         id: videoRecording.guideId,
         active: false,
@@ -112,12 +148,22 @@ export async function stopRecording() {
   }
 
   const stoppedGuide = { ...guide, active: false };
-  await sendMessageToRecordedTab(guide, "stopRecording");
 
   if (guide.recordingMode === "video") {
+    const videoRecording = await storage.get<VideoRecordingState>(
+      "videoRecording",
+    );
+    if (videoRecording?.status === "starting") {
+      await cancelVideoSetupRecording(guide);
+      return;
+    }
+
+    await sendMessageToRecordedTab(guide, "stopRecording");
     await stopVideoGuideRecording(guide);
     return;
   }
+
+  await sendMessageToRecordedTab(guide, "stopRecording");
 
   if (guide.recordingMode === "append" && guide.appendRecording) {
     await finishAppendRecordingApi(

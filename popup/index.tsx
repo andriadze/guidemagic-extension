@@ -9,6 +9,10 @@ import { useGuide } from "./hooks/useGuide";
 import { useTeams } from "./hooks/useTeams";
 import "./popup.css";
 
+type RecordingMode = "steps" | "video";
+
+const RECORDING_MODE_STORAGE_KEY = "guidemagic_recording_mode";
+
 function getRoleLabel(role?: TeamRole) {
   if (!role) {
     return "";
@@ -20,6 +24,11 @@ function getRoleLabel(role?: TeamRole) {
 
 function canRecordForRole(role?: TeamRole) {
   return !role || ["owner", "admin", "editor"].includes(role);
+}
+
+function getSavedRecordingMode(): RecordingMode {
+  const savedMode = window.localStorage.getItem(RECORDING_MODE_STORAGE_KEY);
+  return savedMode === "video" ? "video" : "steps";
 }
 
 function IndexPopup() {
@@ -40,11 +49,8 @@ function IndexPopup() {
     stopVideoRecording,
     retryVideoUpload,
   } = useGuide();
-  const [recordingMode, setRecordingMode] = useState<"steps" | "video">(
-    "steps",
-  );
-  const [recordMicrophone, setRecordMicrophone] = useState(false);
-  const [recordWebcam, setRecordWebcam] = useState(false);
+  const [recordingMode, setRecordingMode] =
+    useState<RecordingMode>(getSavedRecordingMode);
   const [activeTabLabel, setActiveTabLabel] = useState("this tab");
   const {
     teams,
@@ -92,6 +98,10 @@ function IndexPopup() {
   const hasTeamPicker = teams.length > 1;
   const teamSelectionPending = teamsLoading || switching || !teamsLoaded;
   const workspaceLoading = guideLoading || !teamsLoaded;
+  const selectedModeDescription =
+    recordingMode === "video"
+      ? "Record a quick screen video to explain a workflow, demo a feature, or share an update."
+      : "Capture your workflow as screenshots and turn it into a step-by-step guide.";
   const hasRecordingAccess = pendingAppend
     ? true
     : canRecordForRole(currentTeam?.role);
@@ -114,10 +124,7 @@ function IndexPopup() {
     }
 
     if (recordingMode === "video") {
-      await startVideoRecording({
-        microphone: recordMicrophone,
-        webcam: recordWebcam,
-      });
+      await startVideoRecording();
       return;
     }
 
@@ -129,6 +136,11 @@ function IndexPopup() {
 
   const openGuides = () => {
     chrome.tabs.create({ url: process.env.PLASMO_PUBLIC_APP_ROUTE });
+  };
+
+  const selectRecordingMode = (mode: RecordingMode) => {
+    setRecordingMode(mode);
+    window.localStorage.setItem(RECORDING_MODE_STORAGE_KEY, mode);
   };
 
   return (
@@ -192,6 +204,8 @@ function IndexPopup() {
                   ? videoRecording?.status === "uploading" ||
                     videoRecording?.status === "stopping"
                     ? "Saving video"
+                    : videoRecording?.status === "starting"
+                    ? "Video setup in progress"
                     : "Video recording in progress"
                   : isAppending
                   ? `Adding steps to “${guide?.name || "Untitled guide"}”`
@@ -205,7 +219,9 @@ function IndexPopup() {
               </h1>
               <p>
                 {isVideoRecording
-                  ? "Record your workflow, then stop to upload the video to your guide."
+                  ? videoRecording?.status === "starting"
+                    ? "Finish camera, microphone, and screen sharing setup in the recorder tab."
+                    : "Record your workflow, then stop to upload the video to your guide."
                   : isAppending
                   ? "Complete the additional workflow, then stop to return to the original guide."
                   : isRecording
@@ -213,7 +229,7 @@ function IndexPopup() {
                   : pendingAppend
                   ? `Ready to record ${activeTabLabel}. Switch tabs and reopen GuideMagic if this is not the page you want.`
                   : hasRecordingAccess
-                  ? "Capture your workflow and turn it into a step-by-step guide."
+                  ? selectedModeDescription
                   : hasTeamPicker
                   ? "Choose a team where you are an editor, admin, or owner."
                   : "You need editor, admin, or owner access to record for this team."}
@@ -224,42 +240,18 @@ function IndexPopup() {
                     <button
                       type="button"
                       className={recordingMode === "steps" ? "is-active" : ""}
-                      onClick={() => setRecordingMode("steps")}
+                      onClick={() => selectRecordingMode("steps")}
                     >
                       Step guide
                     </button>
                     <button
                       type="button"
                       className={recordingMode === "video" ? "is-active" : ""}
-                      onClick={() => setRecordingMode("video")}
+                      onClick={() => selectRecordingMode("video")}
                     >
                       Video
                     </button>
                   </div>
-                  {recordingMode === "video" && (
-                    <div className="video-options">
-                      <label>
-                        <input
-                          type="checkbox"
-                          checked={recordMicrophone}
-                          onChange={(event) =>
-                            setRecordMicrophone(event.target.checked)
-                          }
-                        />
-                        <span>Microphone</span>
-                      </label>
-                      <label>
-                        <input
-                          type="checkbox"
-                          checked={recordWebcam}
-                          onChange={(event) =>
-                            setRecordWebcam(event.target.checked)
-                          }
-                        />
-                        <span>Webcam</span>
-                      </label>
-                    </div>
-                  )}
                 </div>
               )}
               <RecordButton

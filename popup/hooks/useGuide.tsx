@@ -83,76 +83,6 @@ export function useGuide() {
       .catch(() => undefined);
   };
 
-  const ensureUserMediaPermission = async (options: VideoRecordingOptions) => {
-    if (!options.microphone && !options.webcam) {
-      return;
-    }
-
-    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    console.info("[GuideMagic video] opening mic/webcam permission window", {
-      requestId,
-      options,
-    });
-
-    await new Promise<void>((resolve, reject) => {
-      let permissionWindowId: number | undefined;
-      const cleanup = (closeWindow: boolean) => {
-        globalThis.clearTimeout(timeoutId);
-        chrome.runtime.onMessage.removeListener(handlePermissionResult);
-        if (closeWindow && permissionWindowId != null) {
-          void chrome.windows.remove(permissionWindowId).catch(() => undefined);
-        }
-      };
-
-      const timeoutId = globalThis.setTimeout(() => {
-        cleanup(true);
-        reject(new Error("Camera permission request timed out"));
-      }, 60_000);
-
-      const handlePermissionResult = (message: any) => {
-        if (
-          message?.type !== "GUIDEMAGIC_MEDIA_PERMISSION_RESULT" ||
-          message.requestId !== requestId
-        ) {
-          return;
-        }
-
-        cleanup(false);
-        if (message.success) {
-          console.info("[GuideMagic video] mic/webcam permission granted", {
-            requestId,
-          });
-          resolve();
-          return;
-        }
-        reject(new Error(message.error || "Camera permission was not granted"));
-      };
-
-      chrome.runtime.onMessage.addListener(handlePermissionResult);
-      const params = new URLSearchParams({
-        requestId,
-        microphone: String(options.microphone),
-        webcam: String(options.webcam),
-      });
-
-      chrome.windows
-        .create({
-          url: chrome.runtime.getURL(`tabs/media-permission.html?${params}`),
-          type: "popup",
-          width: 420,
-          height: 340,
-          focused: true,
-        })
-        .then((permissionWindow) => {
-          permissionWindowId = permissionWindow.id;
-        })
-        .catch((error) => {
-          cleanup(true);
-          reject(error);
-        });
-    });
-  };
-
   const startRecording = async () => {
     if (actionPending) {
       return false;
@@ -240,7 +170,9 @@ export function useGuide() {
     }
   };
 
-  const startVideoRecording = async (options: VideoRecordingOptions) => {
+  const startVideoRecording = async (
+    options: VideoRecordingOptions = { microphone: false, webcam: false },
+  ) => {
     if (actionPending) {
       return false;
     }
@@ -260,7 +192,6 @@ export function useGuide() {
         throw new Error("No active tab to record");
       }
       recordingTabId = targetTabId;
-      await ensureUserMediaPermission(options);
       const newGuide = await startRecordingApi();
       if (!newGuide) {
         throw new Error("Guide creation failed");
@@ -288,26 +219,12 @@ export function useGuide() {
       const response = await chrome.runtime.sendMessage({
         type: "START_GUIDEMAGIC_VIDEO_RECORDING",
         guideId: newGuide.id,
+        targetTabId,
         options,
       });
       if (!response?.success) {
         throw new Error(response?.error || "Could not start video recording");
       }
-      await sendMessageToTab(targetTabId, "recordingStarting");
-      await storage.set("guide", recordingGuide);
-      await storage.set("videoRecording", recordingState);
-      setGuide(recordingGuide);
-      setVideoRecording(recordingState);
-      if (options.webcam) {
-        await sendMessageToTab(targetTabId, "startVideoPreview");
-      }
-      await sendMessageToTab(targetTabId, "startRecording");
-      const startedState: VideoRecordingState = {
-        ...recordingState,
-        status: "recording",
-      };
-      await storage.set("videoRecording", startedState);
-      setVideoRecording(startedState);
       return true;
     } catch (error) {
       const fallbackTabId = await getActiveTabId().catch(() => undefined);

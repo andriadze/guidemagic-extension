@@ -76,9 +76,13 @@ const PlasmoPricingExtra = () => {
   const [fade, setFade] = useState(false);
   const [videoPreviewActive, setVideoPreviewActive] = useState(false);
   const [videoPreviewError, setVideoPreviewError] = useState("");
+  const [videoPreviewFrame, setVideoPreviewFrame] = useState("");
+  const [videoPreviewRemoteActive, setVideoPreviewRemoteActive] = useState(false);
   const [rect, setRect] = useState(null);
   const videoPreviewRef = useRef<HTMLVideoElement>(null);
   const videoPreviewStreamRef = useRef<MediaStream | null>(null);
+  const videoPreviewPeerConnectionRef = useRef<RTCPeerConnection | null>(null);
+  const videoPreviewDiagnosticsTimerRef = useRef<number | null>(null);
   const lastElem = useRef<Element>();
   const stoppingRef = useRef(false);
   const lastPointerCaptureRef = useRef<LastPointerCapture | null>(null);
@@ -138,6 +142,138 @@ const PlasmoPricingExtra = () => {
     setRect(lastElem.current?.getBoundingClientRect());
   }, [setRect, lastElem]);
 
+  const playVideoPreview = useCallback(() => {
+    const video = videoPreviewRef.current;
+    const stream = videoPreviewStreamRef.current;
+    if (!video || !stream) {
+      return;
+    }
+
+    if (video.srcObject !== stream) {
+      video.srcObject = stream;
+    }
+    void video.play().then(
+      () =>
+        console.info("[GuideMagic video] WebRTC webcam preview playing", {
+          videoWidth: video.videoWidth,
+          videoHeight: video.videoHeight,
+          readyState: video.readyState,
+        }),
+      (error) =>
+        console.warn("[GuideMagic video] WebRTC webcam preview play failed", error),
+    );
+  }, []);
+
+  const stopVideoPreviewDiagnostics = useCallback(() => {
+    if (videoPreviewDiagnosticsTimerRef.current != null) {
+      window.clearInterval(videoPreviewDiagnosticsTimerRef.current);
+      videoPreviewDiagnosticsTimerRef.current = null;
+    }
+  }, []);
+
+  const startVideoPreviewDiagnostics = useCallback(() => {
+    if (videoPreviewDiagnosticsTimerRef.current != null) {
+      return;
+    }
+    videoPreviewDiagnosticsTimerRef.current = window.setInterval(() => {
+      const video = videoPreviewRef.current;
+      if (!video) {
+        console.info("[GuideMagic video] WebRTC webcam preview state", {
+          mounted: false,
+          hasStream: Boolean(videoPreviewStreamRef.current),
+        });
+        return;
+      }
+      const quality =
+        "getVideoPlaybackQuality" in video
+          ? video.getVideoPlaybackQuality()
+          : null;
+      console.info("[GuideMagic video] WebRTC webcam preview state", {
+        currentTime: video.currentTime,
+        readyState: video.readyState,
+        paused: video.paused,
+        videoWidth: video.videoWidth,
+        videoHeight: video.videoHeight,
+        droppedVideoFrames: quality?.droppedVideoFrames,
+        totalVideoFrames: quality?.totalVideoFrames,
+      });
+    }, 1000);
+  }, []);
+
+  const attachVideoPreviewElement = useCallback(
+    (element: HTMLVideoElement | null) => {
+      videoPreviewRef.current = element;
+      if (element) {
+        playVideoPreview();
+      }
+    },
+    [playVideoPreview],
+  );
+
+  const waitForIceGatheringComplete = useCallback(
+    async (peerConnection: RTCPeerConnection) => {
+      if (peerConnection.iceGatheringState === "complete") {
+        return;
+      }
+
+      await new Promise<void>((resolve) => {
+        const timeoutId = window.setTimeout(resolve, 3000);
+        const onStateChange = () => {
+          if (peerConnection.iceGatheringState !== "complete") {
+            return;
+          }
+          window.clearTimeout(timeoutId);
+          peerConnection.removeEventListener(
+            "icegatheringstatechange",
+            onStateChange,
+          );
+          resolve();
+        };
+        peerConnection.addEventListener("icegatheringstatechange", onStateChange);
+      });
+    },
+    [],
+  );
+
+  const handleWebrtcPreviewOffer = useCallback(
+    async (offer: RTCSessionDescriptionInit) => {
+      videoPreviewPeerConnectionRef.current?.close();
+      const peerConnection = new RTCPeerConnection();
+      videoPreviewPeerConnectionRef.current = peerConnection;
+      peerConnection.ontrack = (event) => {
+        const stream = event.streams[0] || new MediaStream([event.track]);
+        console.info("[GuideMagic video] WebRTC webcam preview track received", {
+          href: window.location.href,
+          isTopFrame: window.top === window,
+          trackKind: event.track.kind,
+          trackReadyState: event.track.readyState,
+          streamTracks: stream.getTracks().map((track) => ({
+            kind: track.kind,
+            readyState: track.readyState,
+            muted: track.muted,
+          })),
+        });
+        videoPreviewStreamRef.current = stream;
+        setVideoPreviewFrame("");
+        setVideoPreviewError("");
+        setVideoPreviewRemoteActive(true);
+        setVideoPreviewActive(true);
+        startVideoPreviewDiagnostics();
+        window.setTimeout(playVideoPreview, 0);
+      };
+      await peerConnection.setRemoteDescription(offer);
+      const answer = await peerConnection.createAnswer();
+      await peerConnection.setLocalDescription(answer);
+      await waitForIceGatheringComplete(peerConnection);
+      console.info("[GuideMagic video] WebRTC webcam preview answer created", {
+        href: window.location.href,
+        isTopFrame: window.top === window,
+      });
+      return peerConnection.localDescription?.toJSON();
+    },
+    [playVideoPreview, startVideoPreviewDiagnostics, waitForIceGatheringComplete],
+  );
+
   const handleRecorderStatusChange = useCallback(
     (request, sender, sendResponse) => {
       if (request.message === "startRecording") {
@@ -157,9 +293,38 @@ const PlasmoPricingExtra = () => {
       } else if (request.message === "stopVideoPreview") {
         setVideoPreviewActive(false);
         setVideoPreviewError("");
+        setVideoPreviewFrame("");
+        setVideoPreviewRemoteActive(false);
+        stopVideoPreviewDiagnostics();
+        videoPreviewPeerConnectionRef.current?.close();
+        videoPreviewPeerConnectionRef.current = null;
+      } else if (request.message === "updateVideoPreviewFrame") {
+        setVideoPreviewError("");
+        setVideoPreviewActive(true);
+        setVideoPreviewFrame(request.frame || "");
+      } else if (request.message === "guidemagicWebrtcPreviewOffer") {
+        if (window.top !== window) {
+          sendResponse({ success: false, error: "Ignoring non-top frame" });
+          return;
+        }
+        handleWebrtcPreviewOffer(request.offer)
+          .then((answer) => sendResponse({ success: true, answer }))
+          .catch((error) =>
+            sendResponse({
+              success: false,
+              error: error instanceof Error ? error.message : String(error),
+            }),
+          );
+        return true;
       }
     },
-    [isRecording, setRecording, setRect]
+    [
+      handleWebrtcPreviewOffer,
+      isRecording,
+      setRecording,
+      setRect,
+      stopVideoPreviewDiagnostics,
+    ]
   );
 
   useEffect(() => {
@@ -351,48 +516,25 @@ const PlasmoPricingExtra = () => {
   }, [handleInit]);
 
   useEffect(() => {
-    if (!videoPreviewActive) {
-      videoPreviewStreamRef.current?.getTracks().forEach((track) => track.stop());
-      videoPreviewStreamRef.current = null;
+    if (videoPreviewRemoteActive) {
+      playVideoPreview();
+      return;
+    }
+
+    if (!videoPreviewActive || videoPreviewFrame) {
       if (videoPreviewRef.current) {
         videoPreviewRef.current.srcObject = null;
       }
       return;
     }
 
-    let cancelled = false;
-    navigator.mediaDevices
-      .getUserMedia({
-        video: {
-          width: { ideal: 320 },
-          height: { ideal: 180 },
-        },
-        audio: false,
-      })
-      .then((stream) => {
-        if (cancelled) {
-          stream.getTracks().forEach((track) => track.stop());
-          return;
-        }
-        videoPreviewStreamRef.current = stream;
-        if (videoPreviewRef.current) {
-          videoPreviewRef.current.srcObject = stream;
-          void videoPreviewRef.current.play();
-        }
-      })
-      .catch((error) => {
-        console.warn("[GuideMagic video] camera preview unavailable", error);
-        if (!cancelled) {
-          setVideoPreviewError("Camera preview unavailable");
-        }
-      });
-
-    return () => {
-      cancelled = true;
-      videoPreviewStreamRef.current?.getTracks().forEach((track) => track.stop());
-      videoPreviewStreamRef.current = null;
-    };
-  }, [videoPreviewActive]);
+    setVideoPreviewError("");
+  }, [
+    playVideoPreview,
+    videoPreviewActive,
+    videoPreviewFrame,
+    videoPreviewRemoteActive,
+  ]);
 
   useEffect(() => {
     document.addEventListener("mouseover", handleMouseOver);
@@ -416,6 +558,8 @@ const PlasmoPricingExtra = () => {
       document.removeEventListener("scroll", handleScroll);
       document.removeEventListener("scrollend", handleScrollFinished);
       chrome.runtime.onMessage.removeListener(handleRecorderStatusChange);
+      stopVideoPreviewDiagnostics();
+      videoPreviewPeerConnectionRef.current?.close();
     };
   }, [
     handleMouseOver,
@@ -424,6 +568,7 @@ const PlasmoPricingExtra = () => {
     handleScrollFinished,
     onMouseDown,
     onSubmit,
+    stopVideoPreviewDiagnostics,
   ]);
 
   return (
@@ -478,12 +623,22 @@ const PlasmoPricingExtra = () => {
         <div className="video-preview-bubble">
           {videoPreviewError ? (
             <div className="video-preview-error">{videoPreviewError}</div>
+          ) : videoPreviewFrame ? (
+            <img
+              className="video-preview video-preview-frame"
+              src={videoPreviewFrame}
+              alt=""
+              aria-hidden="true"
+            />
           ) : (
             <video
-              ref={videoPreviewRef}
+              ref={attachVideoPreviewElement}
               className="video-preview"
               muted
               playsInline
+              autoPlay
+              onLoadedMetadata={playVideoPreview}
+              onCanPlay={playVideoPreview}
             />
           )}
         </div>
@@ -678,13 +833,22 @@ export const getStyle: PlasmoGetStyle = () => {
     background: #0f172a;
     box-shadow: 0 18px 42px rgba(15, 23, 42, 0.32);
     pointer-events: none;
+    z-index: 2147483647;
   }
 
   .video-preview {
+    position: relative;
+    z-index: 2;
+    display: block;
     width: 100%;
     height: 100%;
     object-fit: cover;
+    background: #0f172a;
     transform: scaleX(-1);
+  }
+
+  .video-preview-frame {
+    transform: none;
   }
 
   .video-preview-error {

@@ -1,6 +1,8 @@
 export interface VideoRecordingOptions {
   microphone: boolean;
   webcam: boolean;
+  audioDeviceId?: string;
+  videoDeviceId?: string;
 }
 
 export interface VideoRecordingState {

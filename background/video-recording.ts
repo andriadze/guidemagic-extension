@@ -1,10 +1,13 @@
 import { Storage } from "@plasmohq/storage";
-import { markRecordedVideoUploadFailedApi } from "~api/guide.api";
+import {
+  markRecordedVideoUploadFailedApi,
+  stopRecordingApi,
+} from "~api/guide.api";
 import type { VideoRecordingOptions } from "~ts/VideoRecording";
 import AuthHandler from "~util/AuthHandler";
 
 const storage = new Storage();
-const OFFSCREEN_DOCUMENT_PATH = "tabs/video-recorder.html";
+const VIDEO_RECORDER_PATH = "tabs/video-recorder.html";
 const VIDEO_UPLOAD_TIMEOUT_ALARM = "guidemagic-video-upload-timeout";
 const VIDEO_UPLOAD_TIMEOUT_MINUTES = 20;
 
@@ -19,47 +22,54 @@ async function failVideoUpload(guideId: number, message: string) {
   });
 }
 
-async function ensureOffscreenDocument() {
-  const offscreenUrl = chrome.runtime.getURL(OFFSCREEN_DOCUMENT_PATH);
-  const existingContexts = await chrome.runtime.getContexts?.({
-    contextTypes: ["OFFSCREEN_DOCUMENT" as chrome.runtime.ContextType],
-    documentUrls: [offscreenUrl],
-  });
+async function cancelStartingVideoRecording(guideId: number) {
+  await stopRecordingApi(guideId).catch(() => undefined);
+  await storage.remove("guide");
+  await storage.remove("videoRecording");
+  await storage.remove("videoRecorderTabId");
+  await storage.remove("videoRecorderWindowId");
+}
 
-  if (existingContexts?.length) {
-    return;
+async function openRecorderTab(
+  guideId: number,
+  options: VideoRecordingOptions,
+  targetTabId?: number,
+) {
+  const params = new URLSearchParams({
+    guideId: String(guideId),
+    microphone: String(options.microphone),
+    webcam: String(options.webcam),
+  });
+  if (targetTabId) {
+    params.set("targetTabId", String(targetTabId));
   }
 
-  await chrome.offscreen.createDocument({
-    url: OFFSCREEN_DOCUMENT_PATH,
-    reasons: [
-      chrome.offscreen.Reason.USER_MEDIA,
-      chrome.offscreen.Reason.DISPLAY_MEDIA,
-    ],
-    justification: "Record GuideMagic videos from a user-selected screen source",
+  const targetTab = targetTabId ? await chrome.tabs.get(targetTabId) : null;
+  const recorderTab = await chrome.tabs.create({
+    url: chrome.runtime.getURL(`${VIDEO_RECORDER_PATH}?${params}`),
+    active: true,
+    pinned: true,
+    index: 0,
+    windowId: targetTab?.windowId,
   });
+
+  await storage.set("videoRecorderTabId", recorderTab.id);
+  await storage.set("videoRecorderWindowId", recorderTab.windowId);
 }
 
 async function startVideoRecording(
   guideId: number,
   options: VideoRecordingOptions,
+  targetTabId?: number,
 ) {
-  await ensureOffscreenDocument();
-  const response = await chrome.runtime.sendMessage({
-    target: "video-recorder",
-    type: "START_VIDEO_RECORDING",
-    guideId,
-    options,
-  });
-
-  if (!response?.success) {
-    throw new Error(response?.error || "Could not start video recording");
-  }
+  await openRecorderTab(guideId, options, targetTabId);
+  const current = await storage.get<any>("videoRecording");
 
   await storage.set("videoRecording", {
     guideId,
+    targetTabId: targetTabId || current?.targetTabId,
     active: true,
-    status: "recording",
+    status: "starting",
     options,
   });
 }
@@ -120,7 +130,7 @@ async function getAccessToken(refresh?: boolean) {
 export function registerVideoRecordingBackground() {
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message?.type === "START_GUIDEMAGIC_VIDEO_RECORDING") {
-      startVideoRecording(message.guideId, message.options)
+      startVideoRecording(message.guideId, message.options, message.targetTabId)
         .then(() => sendResponse({ success: true }))
         .catch((error) =>
           sendResponse({
@@ -129,6 +139,27 @@ export function registerVideoRecordingBackground() {
           }),
         );
       return true;
+    }
+
+    if (message?.type === "VIDEO_RECORDING_STARTED") {
+      if (message.targetTabId) {
+        void (async () => {
+          const targetTabId = Number(message.targetTabId);
+          await chrome.tabs
+            .sendMessage(targetTabId, { message: "startRecording" })
+            .catch(() => undefined);
+          await chrome.tabs.update(targetTabId, { active: true }).catch(() => undefined);
+          const current = await storage.get<any>("videoRecording");
+          if (current?.guideId === message.guideId) {
+            await storage.set("videoRecording", {
+              ...current,
+              active: true,
+              status: "recording",
+              options: message.options || current.options,
+            });
+          }
+        })();
+      }
     }
 
     if (message?.type === "STOP_GUIDEMAGIC_VIDEO_RECORDING") {
@@ -167,10 +198,81 @@ export function registerVideoRecordingBackground() {
       return true;
     }
 
+    if (message?.type === "GUIDEMAGIC_WEBRTC_PREVIEW_OFFER") {
+      chrome.tabs
+        .sendMessage(Number(message.targetTabId), {
+          message: "guidemagicWebrtcPreviewOffer",
+          offer: message.offer,
+        })
+        .then((response) => sendResponse(response))
+        .catch((error) =>
+          sendResponse({
+            success: false,
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        );
+      return true;
+    }
+
     if (message?.type === "VIDEO_RECORDING_COMPLETE") {
       void chrome.alarms.clear(VIDEO_UPLOAD_TIMEOUT_ALARM);
       void storage.remove("videoRecording");
+      void (async () => {
+        const recorderTabId =
+          sender.tab?.id || (await storage.get<number>("videoRecorderTabId"));
+        const recorderWindowId = await storage.get<number>("videoRecorderWindowId");
+        await storage.remove("videoRecorderTabId");
+        await storage.remove("videoRecorderWindowId");
+        if (recorderTabId) {
+          await chrome.tabs.remove(recorderTabId).catch(() => undefined);
+        } else if (recorderWindowId) {
+          await chrome.windows.remove(recorderWindowId).catch(() => undefined);
+        }
+      })();
     }
+
+    if (message?.type === "VIDEO_RECORDING_FAILED") {
+      void (async () => {
+        const state = await storage.get<any>("videoRecording");
+        const guide = await storage.get<any>("guide");
+        const targetTabId = state?.targetTabId || guide?.recordingTabId;
+        if (targetTabId) {
+          await chrome.tabs
+            .sendMessage(targetTabId, { message: "stopVideoPreview" })
+            .catch(() => undefined);
+          await chrome.tabs
+            .sendMessage(targetTabId, { message: "stopRecording" })
+            .catch(() => undefined);
+        }
+        if (message.guideId) {
+          await failVideoUpload(
+            Number(message.guideId),
+            message.error || "Video recording failed",
+          );
+        }
+        await storage.remove("guide");
+        await storage.remove("videoRecorderTabId");
+        await storage.remove("videoRecorderWindowId");
+      })();
+    }
+  });
+
+  chrome.tabs.onRemoved.addListener((tabId) => {
+    void (async () => {
+      const recorderTabId = await storage.get<number>("videoRecorderTabId");
+      if (recorderTabId !== tabId) {
+        return;
+      }
+
+      const state = await storage.get<any>("videoRecording");
+      if (state?.status !== "starting" || !state.guideId) {
+        await storage.remove("videoRecorderTabId");
+        await storage.remove("videoRecorderWindowId");
+        return;
+      }
+
+      await cancelStartingVideoRecording(Number(state.guideId));
+    })();
   });
 
   chrome.alarms.onAlarm.addListener((alarm) => {
