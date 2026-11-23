@@ -55,6 +55,7 @@ function getDefaultVideoRecordingOptions(): VideoRecordingOptions {
     microphone: false,
     webcam: false,
     showSteps: true,
+    enhancedPointer: false,
   };
 }
 
@@ -66,6 +67,10 @@ function normalizeVideoRecordingOptions(
     ...options,
     showSteps:
       typeof options?.showSteps === "boolean" ? options.showSteps : true,
+    enhancedPointer:
+      typeof options?.enhancedPointer === "boolean"
+        ? options.enhancedPointer
+        : false,
   };
 }
 
@@ -1934,6 +1939,37 @@ function VideoRecorderPage() {
                 <div style={styles.controlText}>
                   <strong style={styles.controlTitle}>Record clicks</strong>
                   <small style={styles.controlHint}>Show captured clicks in the guide(Only works for clicks inside the browser)</small>
+                </div>
+              </div>
+              <div style={{ ...styles.controlRow, ...styles.controlRowNoAccessory }}>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={options.enhancedPointer}
+                  aria-label="Large pointer"
+                  style={{
+                    ...styles.switchButton,
+                    ...(options.enhancedPointer ? styles.switchButtonOn : {}),
+                  }}
+                  disabled={controlsDisabled}
+                  onClick={() => {
+                    void updateRecordingOptions({
+                      enhancedPointer: !options.enhancedPointer,
+                    });
+                  }}
+                >
+                  <span
+                    style={{
+                      ...styles.switchKnob,
+                      ...(options.enhancedPointer ? styles.switchKnobOn : {}),
+                    }}
+                  />
+                </button>
+                <div style={styles.controlText}>
+                  <strong style={styles.controlTitle}>Large pointer</strong>
+                  <small style={styles.controlHint}>
+                    Replace the page cursor with a larger pointer in the recording
+                  </small>
                 </div>
               </div>
             </div>

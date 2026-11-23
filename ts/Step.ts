@@ -2,7 +2,7 @@ import type { Guide } from "./Guide";
 import type { Image } from "./Image";
 import type { StepType } from "./StepType.enum";
 
-export type StepEventType = "click" | "submit";
+export type StepEventType = "click" | "submit" | "change" | "select" | "background-click";
 
 export interface Step {
   id: number;
@@ -13,6 +13,7 @@ export interface Step {
   guide?: Guide | number;
   images?: Image[];
   htmlTag?: string;
+  pageLanguage?: string;
   eventType?: StepEventType;
   placeholder?: string;
   parentTitle?: string;

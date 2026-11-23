@@ -66,6 +66,7 @@ async function stopVideoGuideRecording(guide: Guide) {
       microphone: false,
       webcam: false,
       showSteps: true,
+      enhancedPointer: false,
     },
     uploadStartedAt: Date.now(),
   };

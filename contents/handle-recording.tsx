@@ -16,8 +16,19 @@ import {
 import type { Guide } from "~ts/Guide";
 import type { StepEventType } from "~ts/Step";
 import type { VideoRecordingOptions } from "~ts/VideoRecording";
-import parseTitle from "~util/parseTitle";
+import {
+  controlLabel,
+  describeFieldChange,
+  describePopupOption,
+  findTextField,
+  isHandledField,
+  isLikelyBackgroundClick,
+  isPopupTrigger,
+  popupOptionSelector,
+  safeElementTag,
+} from "~util/recording-actions";
 import { getWindowInformation } from "~util/windowInformation";
+import cursorImage from "data-base64:~/assets/cursor.png";
 import logoImage from "data-base64:~/assets/icon.png";
 
 export const config: PlasmoCSConfig = {
@@ -45,6 +56,22 @@ export const mountShadowHost: PlasmoMountShadowHost = ({ shadowHost }) => {
 
 const storage = new Storage();
 const DUPLICATE_SUBMIT_WINDOW_MS = 1000;
+const ENHANCED_POINTER_STYLE_ID = "guidemagic-enhanced-pointer-style";
+const ENHANCED_POINTER_CLASS = "guidemagic-enhanced-pointer-active";
+
+const EnhancedPointerCursor = () => (
+  <img
+    src={cursorImage}
+    alt=""
+    draggable={false}
+    style={{
+      display: "block",
+      width: "100%",
+      height: "100%",
+      userSelect: "none",
+    }}
+  />
+);
 
 type LastPointerCapture = {
   form: HTMLFormElement | null;
@@ -87,6 +114,8 @@ const PlasmoPricingExtra = () => {
   const [recordingStarting, setRecordingStarting] = useState(false);
   const [isRecording, setRecording] = useState(false);
   const [recordingVisualsEnabled, setRecordingVisualsEnabled] = useState(true);
+  const [enhancedPointerEnabled, setEnhancedPointerEnabled] = useState(false);
+  const [enhancedPointerClicking, setEnhancedPointerClicking] = useState(false);
   const [performAnim, setPerformAnim] = useState(false);
   const [fade, setFade] = useState(false);
   const [videoPreviewActive, setVideoPreviewActive] = useState(false);
@@ -95,6 +124,8 @@ const PlasmoPricingExtra = () => {
   const [videoPreviewRemoteActive, setVideoPreviewRemoteActive] = useState(false);
   const [rect, setRect] = useState(null);
   const videoPreviewRef = useRef<HTMLVideoElement>(null);
+  const enhancedPointerRef = useRef<HTMLDivElement | null>(null);
+  const enhancedPointerClickTimerRef = useRef<number | null>(null);
   const videoPreviewStreamRef = useRef<MediaStream | null>(null);
   const videoPreviewPeerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const videoPreviewDiagnosticsTimerRef = useRef<number | null>(null);
@@ -114,6 +145,8 @@ const PlasmoPricingExtra = () => {
     setRecording(false);
     setPerformAnim(false);
     setRecordingVisualsEnabled(true);
+    setEnhancedPointerEnabled(false);
+    setEnhancedPointerClicking(false);
     recordingStartedAtRef.current = null;
     recordingModeRef.current = null;
     try {
@@ -304,6 +337,7 @@ const PlasmoPricingExtra = () => {
       if (request.message === "startRecording") {
         setRecordingStarting(false);
         const showVisuals = shouldShowRecordingVisuals(null, request.options);
+        setEnhancedPointerEnabled(Boolean(request.options?.enhancedPointer));
         recordingStartedAtRef.current =
           typeof request.recordingStartedAt === "number"
             ? request.recordingStartedAt
@@ -324,6 +358,8 @@ const PlasmoPricingExtra = () => {
         setRecording(false);
         setPerformAnim(false);
         setRecordingVisualsEnabled(true);
+        setEnhancedPointerEnabled(false);
+        setEnhancedPointerClicking(false);
         recordingStartedAtRef.current = null;
         recordingModeRef.current = null;
       } else if (request.message === "recordingStarting") {
@@ -394,6 +430,7 @@ const PlasmoPricingExtra = () => {
       target: HTMLElement,
       options: {
         eventType: StepEventType;
+        title?: string;
         mousePosX?: number | null;
         mousePosY?: number | null;
       }
@@ -403,10 +440,15 @@ const PlasmoPricingExtra = () => {
       }
 
       const placeholder = target.getAttribute("placeholder");
-      const title = parseTitle(target);
-      const parentTitle = parseTitle(target.parentNode);
-
-      const htmlTag = target.outerHTML;
+      const label = controlLabel(target);
+      const title = options.title || label ||
+        (!isHandledField(target) && !target.querySelector("input, textarea, select, [contenteditable]")
+          ? target.innerText?.trim().slice(0, 160)
+          : "") || "";
+      const parentTitle = target.parentElement
+        ? controlLabel(target.parentElement)
+        : "";
+      const htmlTag = safeElementTag(target);
       const rect = target.getBoundingClientRect();
       const {
         width: windowWidth,
@@ -430,6 +472,7 @@ const PlasmoPricingExtra = () => {
             url: window.location.href,
             placeholder,
             parentTitle,
+            pageLanguage: document.documentElement.lang || undefined,
             height: rect.height,
             width: rect.width,
             top: rect.top,
@@ -438,8 +481,8 @@ const PlasmoPricingExtra = () => {
             right: rect.right,
             scrollX: scrollX,
             scrollY: scrollY,
-            mousePosX: options.mousePosX,
-            mousePosY: options.mousePosY,
+            mousePosX: options.mousePosX ?? rect.left + rect.width / 2,
+            mousePosY: options.mousePosY ?? rect.top + rect.height / 2,
             windowWidth,
             windowHeight,
             screenWidth,
@@ -469,15 +512,39 @@ const PlasmoPricingExtra = () => {
     [isRecording]
   );
 
+  const textFieldCaptures = useRef(new WeakMap<HTMLElement, Promise<boolean>>());
+  const changedEditableFields = useRef(new WeakSet<HTMLElement>());
+
   const onMouseDown = useCallback(
     async (event: PointerEvent) => {
       if (!isRecording) {
         return;
       }
-      const target = event.target as HTMLElement;
-      if (shouldIgnoreTarget(target)) {
+      const target = event.composedPath().find((item): item is HTMLElement =>
+        item instanceof HTMLElement
+      );
+      if (event.button !== 0 || !target || shouldIgnoreTarget(target)) return;
+
+      const option = target.closest<HTMLElement>(popupOptionSelector);
+      const labelControl = target.closest("label")?.control;
+      const textField = !option && findTextField(
+        labelControl instanceof HTMLElement ? labelControl : target
+      );
+      if (textField) {
+        if (!textField.matches(":focus-within") || !textFieldCaptures.current.has(textField)) {
+          const capture = recordStep(textField, {
+            eventType: "click",
+            title: controlLabel(textField) || "the text field",
+            ...(target === textField || textField.contains(target)
+              ? { mousePosX: event.clientX, mousePosY: event.clientY }
+              : {}),
+          });
+          textFieldCaptures.current.set(textField, capture);
+        }
         return;
       }
+      if (!option && (isHandledField(target) || isPopupTrigger(target) ||
+          (labelControl instanceof HTMLElement && isHandledField(labelControl)))) return;
 
       lastPointerCaptureRef.current = {
         form: target.closest("form"),
@@ -485,15 +552,82 @@ const PlasmoPricingExtra = () => {
         capturedAt: Date.now(),
       };
 
-      console.log("Event target", event.target);
-      await recordStep(target, {
-        eventType: "click",
+      const eventType = option
+        ? "select"
+        : isLikelyBackgroundClick(target) ? "background-click" : "click";
+      await recordStep(option || target, {
+        eventType,
+        title: option ? describePopupOption(option) : undefined,
         mousePosX: event.clientX,
         mousePosY: event.clientY,
       });
     },
     [isRecording, recordStep]
   );
+
+  const recordFieldChange = useCallback(async (
+    target: HTMLElement,
+    priorCapture?: Promise<boolean>
+  ) => {
+    // Keep one capture per visit to a field, including its click and change events.
+    if (priorCapture && await priorCapture) return true;
+    return recordStep(target, {
+      eventType: target instanceof HTMLSelectElement ? "select" : "change",
+      title: describeFieldChange(target),
+    });
+  }, [recordStep]);
+
+  const onFieldChange = useCallback((event: Event) => {
+    const target = event.target;
+    if (!isRecording || !(target instanceof HTMLElement) || shouldIgnoreTarget(target) ||
+        !isHandledField(target) || target.closest(popupOptionSelector)) return;
+    void recordFieldChange(target, textFieldCaptures.current.get(target));
+  }, [isRecording, recordFieldChange]);
+
+  const onTextFieldInput = useCallback((event: Event) => {
+    if (!isRecording || !event.isTrusted || !(event.target instanceof HTMLElement)) return;
+    const field = findTextField(event.target);
+    if (!field || shouldIgnoreTarget(field) || field.closest(popupOptionSelector)) return;
+
+    if (field.isContentEditable) changedEditableFields.current.add(field);
+    if (!textFieldCaptures.current.has(field)) {
+      textFieldCaptures.current.set(field, recordFieldChange(field));
+    }
+  }, [isRecording, recordFieldChange]);
+
+  const onTextFieldBlur = useCallback((event: FocusEvent) => {
+    if (!(event.target instanceof HTMLElement)) return;
+    const field = findTextField(event.target);
+    if (!field || (event.relatedTarget instanceof Node && field.contains(event.relatedTarget))) return;
+    const priorCapture = textFieldCaptures.current.get(field);
+    textFieldCaptures.current.delete(field);
+    if (changedEditableFields.current.delete(field)) {
+      void recordFieldChange(field, priorCapture);
+    }
+  }, [recordFieldChange]);
+
+  useEffect(() => {
+    if (!isRecording) {
+      textFieldCaptures.current = new WeakMap();
+      changedEditableFields.current = new WeakSet();
+    }
+  }, [isRecording]);
+
+  const onKeyboardActivation = useCallback((event: MouseEvent) => {
+    const target = event.target;
+    if (event.detail !== 0 || !event.isTrusted ||
+        !(target instanceof HTMLElement) || shouldIgnoreTarget(target)) return;
+    const option = target.closest<HTMLElement>(popupOptionSelector);
+    const control = option || target.closest<HTMLElement>(
+      'button, a[href], [role="button"], [role="link"], input[type="button"]'
+    );
+    if (!control || (!option && (isHandledField(control) || isPopupTrigger(control)))) return;
+    if (control instanceof HTMLButtonElement && control.type === "submit" && control.form) return;
+    void recordStep(control, {
+      eventType: option ? "select" : "click",
+      title: option ? describePopupOption(option) : undefined,
+    });
+  }, [recordStep]);
 
   const onSubmit = useCallback(
     async (event: SubmitEvent) => {
@@ -535,6 +669,9 @@ const PlasmoPricingExtra = () => {
       if (res && res.active) {
         setStepCount(res.stepCount || 0);
         const showVisuals = shouldShowRecordingVisuals(res);
+        setEnhancedPointerEnabled(
+          Boolean(res.recordingMode === "video" && res.videoRecording?.enhancedPointer),
+        );
         recordingModeRef.current = res.recordingMode || null;
         if (!recordingStartedAtRef.current) {
           recordingStartedAtRef.current = Date.now();
@@ -550,6 +687,8 @@ const PlasmoPricingExtra = () => {
         setStepCount(0);
         setRecording(false);
         setRecordingVisualsEnabled(true);
+        setEnhancedPointerEnabled(false);
+        setEnhancedPointerClicking(false);
         recordingStartedAtRef.current = null;
         recordingModeRef.current = null;
         setRect(null);
@@ -598,11 +737,97 @@ const PlasmoPricingExtra = () => {
   ]);
 
   useEffect(() => {
+    if (!isRecording || !enhancedPointerEnabled) {
+      return;
+    }
+
+    let styleElement = document.getElementById(
+      ENHANCED_POINTER_STYLE_ID,
+    ) as HTMLStyleElement | null;
+    if (!styleElement) {
+      styleElement = document.createElement("style");
+      styleElement.id = ENHANCED_POINTER_STYLE_ID;
+      styleElement.textContent = `
+        html.${ENHANCED_POINTER_CLASS},
+        html.${ENHANCED_POINTER_CLASS} *,
+        body.${ENHANCED_POINTER_CLASS},
+        body.${ENHANCED_POINTER_CLASS} * {
+          cursor: none !important;
+        }
+
+        @keyframes guidemagicPointerClick {
+          0% {
+            opacity: 0.92;
+            transform: scale(0.25);
+          }
+          100% {
+            opacity: 0;
+            transform: scale(2.2);
+          }
+        }
+      `;
+      document.head.appendChild(styleElement);
+    }
+
+    document.documentElement.classList.add(ENHANCED_POINTER_CLASS);
+    document.body?.classList.add(ENHANCED_POINTER_CLASS);
+
+    const movePointer = (event: PointerEvent) => {
+      const pointer = enhancedPointerRef.current;
+      if (!pointer) return;
+
+      pointer.style.opacity = "1";
+      pointer.style.transform = `translate3d(${event.clientX}px, ${event.clientY}px, 0)`;
+    };
+    const pressPointer = (event: PointerEvent) => {
+      const target = event.target as HTMLElement;
+      if (shouldIgnoreTarget(target)) {
+        return;
+      }
+
+      setEnhancedPointerClicking(false);
+      window.requestAnimationFrame(() => {
+        setEnhancedPointerClicking(true);
+      });
+      if (enhancedPointerClickTimerRef.current != null) {
+        window.clearTimeout(enhancedPointerClickTimerRef.current);
+      }
+      enhancedPointerClickTimerRef.current = window.setTimeout(() => {
+        setEnhancedPointerClicking(false);
+        enhancedPointerClickTimerRef.current = null;
+      }, 260);
+    };
+
+    document.addEventListener("pointermove", movePointer, true);
+    document.addEventListener("pointerdown", pressPointer, true);
+
+    return () => {
+      document.removeEventListener("pointermove", movePointer, true);
+      document.removeEventListener("pointerdown", pressPointer, true);
+      document.documentElement.classList.remove(ENHANCED_POINTER_CLASS);
+      document.body?.classList.remove(ENHANCED_POINTER_CLASS);
+      styleElement?.remove();
+      if (enhancedPointerClickTimerRef.current != null) {
+        window.clearTimeout(enhancedPointerClickTimerRef.current);
+        enhancedPointerClickTimerRef.current = null;
+      }
+      setEnhancedPointerClicking(false);
+      if (enhancedPointerRef.current) {
+        enhancedPointerRef.current.style.opacity = "0";
+      }
+    };
+  }, [enhancedPointerEnabled, isRecording]);
+
+  useEffect(() => {
     document.addEventListener("mouseover", handleMouseOver);
     window.addEventListener("focus", handleInit);
     document.addEventListener("pointerdown", onMouseDown);
     document.addEventListener("pointerup", onMouseUp);
     document.addEventListener("submit", onSubmit, true);
+    document.addEventListener("change", onFieldChange, true);
+    document.addEventListener("input", onTextFieldInput, true);
+    document.addEventListener("focusout", onTextFieldBlur, true);
+    document.addEventListener("click", onKeyboardActivation, true);
 
     document.addEventListener("scroll", handleScroll);
 
@@ -616,6 +841,10 @@ const PlasmoPricingExtra = () => {
       document.removeEventListener("pointerdown", onMouseDown);
       document.removeEventListener("pointerup", onMouseUp);
       document.removeEventListener("submit", onSubmit, true);
+      document.removeEventListener("change", onFieldChange, true);
+      document.removeEventListener("input", onTextFieldInput, true);
+      document.removeEventListener("focusout", onTextFieldBlur, true);
+      document.removeEventListener("click", onKeyboardActivation, true);
       document.removeEventListener("scroll", handleScroll);
       document.removeEventListener("scrollend", handleScrollFinished);
       chrome.runtime.onMessage.removeListener(handleRecorderStatusChange);
@@ -629,6 +858,10 @@ const PlasmoPricingExtra = () => {
     handleScrollFinished,
     onMouseDown,
     onSubmit,
+    onFieldChange,
+    onTextFieldInput,
+    onTextFieldBlur,
+    onKeyboardActivation,
     stopVideoPreviewDiagnostics,
   ]);
 
@@ -672,6 +905,52 @@ const PlasmoPricingExtra = () => {
             pointerEvents: "none",
           }}
         ></div>
+      )}
+      {isRecording && enhancedPointerEnabled && (
+        <div
+          ref={enhancedPointerRef}
+          aria-hidden="true"
+          style={{
+            position: "fixed",
+            left: 0,
+            top: 0,
+            width: 60,
+            height: 60,
+            opacity: 0,
+            pointerEvents: "none",
+            transform: "translate3d(-100px, -100px, 0)",
+            transition: "opacity 80ms ease",
+            zIndex: 2147483647,
+            filter: "drop-shadow(0 4px 8px rgba(15, 23, 42, 0.28))",
+          }}
+        >
+          {enhancedPointerClicking && (
+            <span
+              style={{
+                position: "absolute",
+                left: -17,
+                top: -17,
+                width: 34,
+                height: 34,
+                border: "3px solid rgba(80, 70, 229, 0.78)",
+                borderRadius: 999,
+                animation: "guidemagicPointerClick 260ms ease-out forwards",
+                boxShadow: "0 0 0 4px rgba(80, 70, 229, 0.14)",
+              }}
+            />
+          )}
+          <div
+            style={{
+              width: "100%",
+              height: "100%",
+              transform: enhancedPointerClicking ? "scale(0.84)" : "scale(1)",
+              transformOrigin: "0 0",
+              transition: "transform 90ms ease-out",
+            }}
+          >
+            <EnhancedPointerCursor />
+          </div>
+        </div>
       )}
       {isRecording && (
         <RecButton

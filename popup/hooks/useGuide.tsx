@@ -175,6 +175,7 @@ export function useGuide() {
       microphone: false,
       webcam: false,
       showSteps: true,
+      enhancedPointer: false,
     },
   ) => {
     if (actionPending) {

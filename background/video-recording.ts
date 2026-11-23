@@ -17,7 +17,12 @@ async function failVideoUpload(guideId: number, message: string) {
     guideId,
     active: false,
     status: "failed",
-    options: { microphone: false, webcam: false, showSteps: true },
+    options: {
+      microphone: false,
+      webcam: false,
+      showSteps: true,
+      enhancedPointer: false,
+    },
     error: message,
   });
 }
@@ -40,6 +45,7 @@ async function openRecorderTab(
     microphone: String(options.microphone),
     webcam: String(options.webcam),
     showSteps: String(options.showSteps),
+    enhancedPointer: String(options.enhancedPointer),
   });
   if (targetTabId) {
     params.set("targetTabId", String(targetTabId));
